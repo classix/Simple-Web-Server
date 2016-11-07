@@ -48,73 +48,21 @@ namespace SimpleWeb {
             Response(): content(&content_buffer) {}
         };
         
+
         std::shared_ptr<Response> request(const std::string& request_type, const std::string& path="/", boost::string_ref content="",
-                const std::map<std::string, std::string>& header=std::map<std::string, std::string>()) {
-            std::string corrected_path=path;
-            if(corrected_path=="")
-                corrected_path="/";
-            
-            boost::asio::streambuf write_buffer;
-            std::ostream write_stream(&write_buffer);
-            write_stream << request_type << " " << corrected_path << " HTTP/1.1\r\n";
-            write_stream << "Host: " << host << "\r\n";
-            for(auto& h: header) {
-                write_stream << h.first << ": " << h.second << "\r\n";
-            }
-            if(content.size()>0)
-                write_stream << "Content-Length: " << content.size() << "\r\n";
-            write_stream << "\r\n";
-            
-            try {
-                connect();
-                
-                boost::asio::write(*socket, write_buffer);
-                if(content.size()>0)
-                    boost::asio::write(*socket, boost::asio::buffer(content.data(), content.size()));
-                
-            }
-            catch(const std::exception& e) {
-                socket_error=true;
-                throw std::invalid_argument(e.what());
-            }
-            
-            return request_read();
+                                          const std::map<std::string, std::string>& header=std::map<std::string, std::string>()) {
+            return request(*socket, request_type, path, content.size(), [content](std::ostream& out) { out.write(content.data(), content.length()); }, header);
         }
         
         std::shared_ptr<Response> request(const std::string& request_type, const std::string& path, std::iostream& content,
-                const std::map<std::string, std::string>& header=std::map<std::string, std::string>()) {
-            std::string corrected_path=path;
-            if(corrected_path=="")
-                corrected_path="/";
+                                          const std::map<std::string, std::string>& header=std::map<std::string, std::string>()) {
             
             content.seekp(0, std::ios::end);
             auto content_length=content.tellp();
             content.seekp(0, std::ios::beg);
             
-            boost::asio::streambuf write_buffer;
-            std::ostream write_stream(&write_buffer);
-            write_stream << request_type << " " << corrected_path << " HTTP/1.1\r\n";
-            write_stream << "Host: " << host << "\r\n";
-            for(auto& h: header) {
-                write_stream << h.first << ": " << h.second << "\r\n";
-            }
-            if(content_length>0)
-                write_stream << "Content-Length: " << content_length << "\r\n";
-            write_stream << "\r\n";
-            if(content_length>0)
-                write_stream << content.rdbuf();
-            
-            try {
-                connect();
-                
-                boost::asio::write(*socket, write_buffer);
-            }
-            catch(const std::exception& e) {
-                socket_error=true;
-                throw std::invalid_argument(e.what());
-            }
-            
-            return request_read();
+
+            return request(*socket, request_type, path, content_length, [&content](std::ostream& out) { out << content.rdbuf(); }, header);
         }
         
     protected:
@@ -144,6 +92,7 @@ namespace SimpleWeb {
         }
         
         virtual void connect()=0;
+        virtual void proxy_connect(std::string proxyHost, int proxyPort)=0;
         
         void parse_response_header(const std::shared_ptr<Response> &response, std::istream& stream) const {
             std::string line;
@@ -170,12 +119,79 @@ namespace SimpleWeb {
                 }
             }
         }
-        
+
+        void writeHeader(std::ostream& write_stream, const std::string& requestType, const std::string& requestPath, const std::map<std::string, std::string>& header, size_t contentLength) {
+          write_stream << requestType << " " << requestPath << " HTTP/1.1\r\n";
+          write_stream << "Host: " << host << "\r\n";
+          for(auto& h: header) {
+            write_stream << h.first << ": " << h.second << "\r\n";
+          }
+          if(contentLength > 0)
+            write_stream << "Content-Length: " << contentLength << "\r\n";
+          write_stream << "\r\n";
+        }
+
+        /** protected helper method to for issuing proxy requests
+         */
+        std::shared_ptr<Response> proxy_request(const std::string& proxyHost, int proxyPort, const std::string& request_type, const std::string& path, size_t contentLength, std::function<void (std::ostream& contentStream)> contentWriter,
+                                                const std::map<std::string, std::string>& header=std::map<std::string, std::string>()) {
+          
+            boost::asio::streambuf write_buffer;
+            std::ostream write_stream(&write_buffer);
+            writeHeader(write_stream, request_type, path, header, contentLength);
+            if (contentLength > 0)
+                contentWriter(write_stream);
+
+            try {
+                proxy_connect(proxyHost, proxyPort);
+                  
+                boost::asio::write(*socket, write_buffer);
+            }
+            catch(const std::exception& e) {
+                socket_error=true;
+                throw std::invalid_argument(e.what());
+            }
+            
+            return request_read();
+
+        }
+
+        template<typename T>
+        std::shared_ptr<Response> request(T& socket, const std::string& request_type, const std::string& path, size_t contentLength, std::function<void (std::ostream& contentStream)> contentWriter,
+                                         const std::map<std::string, std::string>& header=std::map<std::string, std::string>()) {
+            std::string corrected_path=path;
+            if(corrected_path=="")
+                corrected_path="/";
+            
+            boost::asio::streambuf write_buffer;
+            std::ostream write_stream(&write_buffer);
+            writeHeader(write_stream, request_type, corrected_path, header, contentLength);
+            if (contentLength > 0)
+                contentWriter(write_stream);
+
+            try {
+                connect();
+                
+                boost::asio::write(socket, write_buffer);
+            }
+            catch(const std::exception& e) {
+                socket_error=true;
+                throw std::invalid_argument(e.what());
+            }
+            
+            return request_read(socket);
+        }
+
         std::shared_ptr<Response> request_read() {
+          return request_read(*socket);
+        }
+
+        template<typename T>
+        std::shared_ptr<Response> request_read(T& socket) {
             std::shared_ptr<Response> response(new Response());
             
             try {
-                size_t bytes_transferred = boost::asio::read_until(*socket, response->content_buffer, "\r\n\r\n");
+                size_t bytes_transferred = boost::asio::read_until(socket, response->content_buffer, "\r\n\r\n");
                 
                 size_t num_additional_bytes=response->content_buffer.size()-bytes_transferred;
                 
@@ -185,7 +201,7 @@ namespace SimpleWeb {
                 if(header_it!=response->header.end()) {
                     auto content_length=stoull(header_it->second);
                     if(content_length>num_additional_bytes) {
-                        boost::asio::read(*socket, response->content_buffer, 
+                        boost::asio::read(socket, response->content_buffer, 
                                 boost::asio::transfer_exactly(content_length-num_additional_bytes));
                     }
                 }
@@ -196,7 +212,7 @@ namespace SimpleWeb {
                     std::streamsize length;
                     std::string buffer;
                     do {
-                        size_t bytes_transferred = boost::asio::read_until(*socket, response->content_buffer, "\r\n");
+                        size_t bytes_transferred = boost::asio::read_until(socket, response->content_buffer, "\r\n");
                         std::string line;
                         getline(response->content, line);
                         bytes_transferred-=line.size()+1;
@@ -206,7 +222,7 @@ namespace SimpleWeb {
                         auto num_additional_bytes=static_cast<std::streamsize>(response->content_buffer.size()-bytes_transferred);
                     
                         if((2+length)>num_additional_bytes) {
-                            boost::asio::read(*socket, response->content_buffer, 
+                            boost::asio::read(socket, response->content_buffer, 
                                 boost::asio::transfer_exactly(2+length-num_additional_bytes));
                         }
 
@@ -243,16 +259,29 @@ namespace SimpleWeb {
         Client(const std::string& server_port_path) : ClientBase<HTTP>::ClientBase(server_port_path, 80) {
             socket=std::make_shared<HTTP>(io_service);
         }
-        
+
+        std::shared_ptr<Response> proxy_request(const std::string& proxyHost, int proxyPort, const std::string& request_type, const std::string& path="/", boost::string_ref content="",
+                                                const std::map<std::string, std::string>& header=std::map<std::string, std::string>()) {
+
+          std::string proxyPath = "http://" + host + ":" + std::to_string(port) + path;
+          return ClientBase::proxy_request(proxyHost, proxyPort, request_type, path, content.length(), [content](std::ostream& out) { out.write(content.data(), content.length()); }, header);
+        }
     protected:
-        void connect() {
+        virtual void connect() override {
+            //Forward to proxy_connect() implementation
+            proxy_connect(host, port);
+        }
+
+        /** Simply establish a regular TCP connection to the proxy
+         */
+        virtual void proxy_connect(std::string proxyHost, int proxyPort) override {
             if(socket_error || !socket->is_open()) {
-                boost::asio::ip::tcp::resolver::query query(host, std::to_string(port));
+                boost::asio::ip::tcp::resolver::query query(proxyHost, std::to_string(proxyPort));
                 boost::asio::connect(*socket, resolver.resolve(query));
-                
+                  
                 boost::asio::ip::tcp::no_delay option(true);
                 socket->set_option(option);
-                
+                  
                 socket_error=false;
             }
         }

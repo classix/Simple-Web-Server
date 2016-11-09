@@ -50,7 +50,7 @@ public:
     
     void connect() {}
 
-    void proxy_connect(std::string proxyHost, int proxyPort) {}
+    void proxy_connect() {}
     
     bool constructor_parse_test1() {
         if(host!="test.org")

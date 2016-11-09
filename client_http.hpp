@@ -51,7 +51,7 @@ namespace SimpleWeb {
 
         std::shared_ptr<Response> request(const std::string& request_type, const std::string& path="/", boost::string_ref content="",
                                           const std::map<std::string, std::string>& header=std::map<std::string, std::string>()) {
-            return request(*socket, request_type, path, content.size(), [content](std::ostream& out) { out.write(content.data(), content.length()); }, header);
+            return request(*socket, request_type, path, content.size(), [content](std::ostream& out) { out.write(content.data(), content.length()); }, header, !proxy_host.empty());
         }
         
         std::shared_ptr<Response> request(const std::string& request_type, const std::string& path, std::iostream& content,
@@ -62,7 +62,7 @@ namespace SimpleWeb {
             content.seekp(0, std::ios::beg);
             
 
-            return request(*socket, request_type, path, content_length, [&content](std::ostream& out) { out << content.rdbuf(); }, header);
+            return request(*socket, request_type, path, content_length, [&content](std::ostream& out) { out << content.rdbuf(); }, header, !proxy_host.empty());
         }
         
     protected:
@@ -75,24 +75,29 @@ namespace SimpleWeb {
         
         std::string host;
         unsigned short port;
+
+        std::string proxy_host;
+        unsigned short proxy_port;
                 
         ClientBase(const std::string& host_port, unsigned short default_port) : 
                 resolver(io_service), socket_error(false) {
-            size_t host_end=host_port.find(':');
-            if(host_end==std::string::npos) {
-                host=host_port;
-                port=default_port;
-            }
-            else {
-                host=host_port.substr(0, host_end);
-                port=static_cast<unsigned short>(stoul(host_port.substr(host_end+1)));
-            }
+            set_host_port(host_port, default_port, host, port);
 
             endpoint=boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port);
         }
+
+        ClientBase(const std::string& host_port, unsigned short default_port, const std::string& proxyhost_port) : 
+                resolver(io_service), socket_error(false) {
+            set_host_port(host_port, default_port, host, port);
+            set_host_port(proxyhost_port, 8080, proxy_host, proxy_port);
+
+            endpoint=boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), proxy_port);
+        }
         
         virtual void connect()=0;
-        virtual void proxy_connect(std::string proxyHost, int proxyPort)=0;
+        virtual void proxy_connect()=0;
+
+        virtual std::string proxy_path(const std::string& path) { return path; }
         
         void parse_response_header(const std::shared_ptr<Response> &response, std::istream& stream) const {
             std::string line;
@@ -131,37 +136,15 @@ namespace SimpleWeb {
           write_stream << "\r\n";
         }
 
-        /** protected helper method to for issuing proxy requests
-         */
-        std::shared_ptr<Response> proxy_request(const std::string& proxyHost, int proxyPort, const std::string& request_type, const std::string& path, size_t contentLength, std::function<void (std::ostream& contentStream)> contentWriter,
-                                                const std::map<std::string, std::string>& header=std::map<std::string, std::string>()) {
-          
-            boost::asio::streambuf write_buffer;
-            std::ostream write_stream(&write_buffer);
-            writeHeader(write_stream, request_type, path, header, contentLength);
-            if (contentLength > 0)
-                contentWriter(write_stream);
-
-            try {
-                proxy_connect(proxyHost, proxyPort);
-                  
-                boost::asio::write(*socket, write_buffer);
-            }
-            catch(const std::exception& e) {
-                socket_error=true;
-                throw std::invalid_argument(e.what());
-            }
-            
-            return request_read();
-
-        }
-
         template<typename T>
         std::shared_ptr<Response> request(T& socket, const std::string& request_type, const std::string& path, size_t contentLength, std::function<void (std::ostream& contentStream)> contentWriter,
-                                         const std::map<std::string, std::string>& header=std::map<std::string, std::string>()) {
+                                         const std::map<std::string, std::string>& header, bool useProxy) {
             std::string corrected_path=path;
             if(corrected_path=="")
                 corrected_path="/";
+
+            if (useProxy)
+              corrected_path=proxy_path(corrected_path);
             
             boost::asio::streambuf write_buffer;
             std::ostream write_stream(&write_buffer);
@@ -170,7 +153,10 @@ namespace SimpleWeb {
                 contentWriter(write_stream);
 
             try {
-                connect();
+                if (useProxy)
+                    proxy_connect();
+                else
+                    connect();
                 
                 boost::asio::write(socket, write_buffer);
             }
@@ -246,6 +232,18 @@ namespace SimpleWeb {
             
             return response;
         }
+
+    private:
+        void set_host_port(const std::string& host_port, unsigned short default_port, std::string& host_out, unsigned short& port_out) {
+            size_t host_end=host_port.find(':');
+            if(host_end==std::string::npos) {
+                host_out=host_port;
+                port_out=default_port;
+            } else {
+                host_out=host_port.substr(0, host_end);
+                port_out=static_cast<unsigned short>(stoul(host_port.substr(host_end+1)));
+            }
+        }
     };
     
     template<class socket_type>
@@ -260,23 +258,26 @@ namespace SimpleWeb {
             socket=std::make_shared<HTTP>(io_service);
         }
 
-        std::shared_ptr<Response> proxy_request(const std::string& proxyHost, int proxyPort, const std::string& request_type, const std::string& path="/", boost::string_ref content="",
-                                                const std::map<std::string, std::string>& header=std::map<std::string, std::string>()) {
-
-          std::string proxyPath = "http://" + host + ":" + std::to_string(port) + path;
-          return ClientBase::proxy_request(proxyHost, proxyPort, request_type, path, content.length(), [content](std::ostream& out) { out.write(content.data(), content.length()); }, header);
+        Client(const std::string& server_port_path, const std::string& proxyhost_port) : ClientBase<HTTP>::ClientBase(server_port_path, 80, proxyhost_port) {
+            socket=std::make_shared<HTTP>(io_service);
         }
+
     protected:
         virtual void connect() override {
-            //Forward to proxy_connect() implementation
-            proxy_connect(host, port);
+            connect_to(host, port);
         }
 
         /** Simply establish a regular TCP connection to the proxy
          */
-        virtual void proxy_connect(std::string proxyHost, int proxyPort) override {
+        virtual void proxy_connect() override {
+            connect_to(proxy_host, proxy_port);
+        }
+
+        /** Common connect() implementation for proxy_connect() and connect()
+         */
+        void connect_to(const std::string& host, unsigned short port) {
             if(socket_error || !socket->is_open()) {
-                boost::asio::ip::tcp::resolver::query query(proxyHost, std::to_string(proxyPort));
+                boost::asio::ip::tcp::resolver::query query(host, std::to_string(port));
                 boost::asio::connect(*socket, resolver.resolve(query));
                   
                 boost::asio::ip::tcp::no_delay option(true);
@@ -284,6 +285,12 @@ namespace SimpleWeb {
                   
                 socket_error=false;
             }
+        }
+
+        /** HTTP proxy requests need to change the request's path
+         */
+        virtual std::string proxy_path(const std::string& path) {
+            return "http://" + host + ":" + std::to_string(port) + path;
         }
     };
 }

@@ -289,7 +289,7 @@ namespace SimpleWeb {
 
         /** HTTP proxy requests need to change the request's path
          */
-        virtual std::string proxy_path(const std::string& path) {
+        virtual std::string proxy_path(const std::string& path) override {
             return "http://" + host + ":" + std::to_string(port) + path;
         }
     };

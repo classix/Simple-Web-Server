@@ -62,6 +62,9 @@ namespace SimpleWeb {
             if(socket_error || !socket->lowest_layer().is_open()) {
                 boost::asio::ip::tcp::resolver::query query(host, std::to_string(port));
                 boost::asio::connect(socket->lowest_layer(), resolver.resolve(query));
+                // This call here is necessary to prevent the "handshake: tlsv1 alert internal error" which 
+                // can occur when connecting to certain hosts. See: https://stackoverflow.com/a/35182015/4232804
+                SSL_set_tlsext_host_name(socket->native_handle(), host.c_str());
                 
                 boost::asio::ip::tcp::no_delay option(true);
                 socket->lowest_layer().set_option(option);
@@ -78,6 +81,9 @@ namespace SimpleWeb {
             if(socket_error || !socket->lowest_layer().is_open()) {
                 boost::asio::ip::tcp::resolver::query query(proxy_host, std::to_string(proxy_port));
                 boost::asio::connect(socket->lowest_layer(), resolver.resolve(query));
+                // This call here is necessary to prevent the "handshake: tlsv1 alert internal error" which 
+                // can occur when connecting to certain hosts. See: https://stackoverflow.com/a/35182015/4232804
+                SSL_set_tlsext_host_name(socket->native_handle(), proxy_host.c_str());
                 
                 boost::asio::ip::tcp::no_delay option(true);
                 socket->lowest_layer().set_option(option);
